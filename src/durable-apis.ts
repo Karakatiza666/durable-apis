@@ -5,8 +5,7 @@ import {
   StatusError,
   withContent,
 } from 'itty-router-extras';
-
-export type EmptyObj = {[key: string]: any};
+import { EmptyObj, DurableInit, BasicDurable, DurableInitFunction, DurableAPIStub } from './types';
 const URL = 'https://durable/';
 const maxRetries = 10;
 const retryOn = new RegExp([
@@ -16,29 +15,6 @@ const retryOn = new RegExp([
   'The Durable Object\'s code has been updated',
 ].join('|'));
 
-export type Object = Record<string, any>;
-export type DurableInitConstructor<Env, T> = {new (state: DurableObjectState, env: Env): T};
-export type DurableInitFunction<Env, T> = (state: DurableObjectState, env: Env) => T;
-
-export interface BasicDurable<Env = EmptyObj> {
-  (state: DurableObjectState, env: Env): {
-    fetch: (request: Request) => Response | Promise<Response>;
-  };
-}
-
-export type PromisifiedObject<T> = {
-  [K in keyof T]: T[K] extends (...args: any) => Promise<any>
-    ? T[K]
-    : T[K] extends (...args: infer A) => any
-    ? (...args: A) => Promise<ReturnType<T[K]>>
-    : T[K];
-}
-
-export type DurableAPIStub<T> = DurableObjectStub & PromisifiedObject<T>;
-
-
-export type DurableInit<Env = EmptyObj, T extends Object = Object> =
-  DurableInitConstructor<Env, T> | DurableInitFunction<Env, T>;
 
 /**
  * createDurable creates a new Durable Object with a public API that can be called directly from a Worker or another
@@ -79,7 +55,7 @@ export type DurableInit<Env = EmptyObj, T extends Object = Object> =
  * }
  * ```
  */
-export function createDurable<Env = EmptyObj, T extends Object = Object>(durable: DurableInit<Env, T>): BasicDurable<Env> {
+export function createDurable<Env extends EmptyObj /* = EmptyObj*/, T extends Object = Object>(durable: DurableInit<Env, T>): BasicDurable<Env> {
   return function(state: DurableObjectState, env: Env) {
     extendEnv(env);
     const api = (durable as DurableInitFunction<Env, T>)(state, env);
@@ -95,9 +71,10 @@ export function createDurable<Env = EmptyObj, T extends Object = Object>(durable
     });
 
     return {
+      alarm: api.alarm,
       fetch: (request: Request) => request.url.startsWith(URL)
         ? router.handle(request).catch(err => error(err.status || 500, err.message))
-        : api.fetch?.(request) || error(500, 'Durable Object cannot handle request')
+        : /* handleUpgrade(state, request) ??*/ api.fetch?.(request) ?? error(500, 'Durable Object cannot handle request')
     }
   }
 }
@@ -145,20 +122,20 @@ function getDurableGet<T = DurableObjectStub>(namespace: DurableObjectNamespace)
 
     const stub = get.call(namespace, id, options);
     const methods: { [name: string]: (...args: any[]) => any } = {
-      fetch: (...args: any[]) => stub.fetch(...args),
+      fetch: (...args: [input: RequestInfo, init?: RequestInit]) => stub.fetch(...args),
     };
     return new Proxy(stub, {
       // special case for fetch because of breaking behavior
-      get: (obj, prop: string) => prop in methods
-        ? methods[prop]
+      get: (obj, prop: keyof DurableObjectStub) => prop in methods
+        ? methods[prop] // fetch method
         : prop in obj
-        ? obj[prop]
-        : (methods[prop] = (...args: any[]) => stubFetch(obj, prop, args)),
+          ? obj[prop]
+          : (methods[prop] = (...args: any[]) => stubFetch(obj, prop, args)),
     }) as DurableAPIStub<T>;
   };
 }
 
-async function stubFetch(obj: DurableObjectStub, prop: string, content: any, retries = 0) {
+async function stubFetch(obj: DurableObjectStub, prop: string, content: any, retries = 0): Promise<unknown> {
   return obj.fetch(createRequest(prop, content)).then(transformResponse).catch(err => {
     if (!shouldRetry(err, retries)) return Promise.reject(err);
     // Retry up to 11 times over 30 seconds with exponential backoff. 20ms, 40ms, etc
@@ -201,3 +178,13 @@ function shouldRetry(err: any, retries: number) {
   if (retries > maxRetries) return false;
   return retryOn.test(err + '');
 }
+
+// function handleUpgrade(state: DurableObjectState, request: Request) {
+//   if (request.headers.get('Upgrade') === 'websocket') {
+//     return handleWebSocketUpgrade(state)
+//   }
+//   return null
+// }
+
+// function handleWebSocketUpgrade(state: DurableObjectState): Response {
+// }

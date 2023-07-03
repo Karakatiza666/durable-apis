@@ -6,6 +6,7 @@ import {
   withContent,
 } from 'itty-router-extras';
 import { EmptyObj, DurableInit, BasicDurable, DurableInitFunction, DurableAPIStub } from './types';
+export { durableWS } from './durable-ws.js'
 const URL = 'https://durable/';
 const maxRetries = 10;
 const retryOn = new RegExp([
@@ -58,20 +59,23 @@ const retryOn = new RegExp([
 export function createDurable<Env extends EmptyObj /* = EmptyObj*/, T extends Object = Object>(durable: DurableInit<Env, T>): BasicDurable<Env> {
   return function(state: DurableObjectState, env: Env) {
     extendEnv(env);
-    const api = (durable as DurableInitFunction<Env, T>)(state, env);
+    const {
+      alarm, webSocketMessage, webSocketClose, webSocketError,
+      ...api
+    } = (durable as DurableInitFunction<Env, T>)(state, env);
     const router = Router().post('/:prop', withContent as any, async (request: IRequest) => {
-      const { prop } = request.params as {prop: keyof T};
+      const { prop } = request.params as {prop: keyof typeof api};
       const { content } = request;
-
-      if (typeof api[prop] !== 'function') {
+      const method = api[prop]
+      if (typeof method !== 'function') {
         throw new StatusError(500, `Durable Object does not contain method ${prop as string}()`)
       }
-      const response = await (prop === 'fetch' ? api[prop](request) : api[prop](...content));
+      const response = await (prop === 'fetch' ? method(request) : method(...content, request));
       return response instanceof Response ? response : createResponse(response);
     });
 
     return {
-      alarm: api.alarm,
+      alarm, webSocketMessage, webSocketClose, webSocketError,
       fetch: (request: Request) => request.url.startsWith(URL)
         ? router.handle(request).catch(err => error(err.status || 500, err.message))
         : /* handleUpgrade(state, request) ??*/ api.fetch?.(request) ?? error(500, 'Durable Object cannot handle request')
